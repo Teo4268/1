@@ -1,76 +1,50 @@
 import asyncio
 import websockets
-import json
+import logging
 
-async def handle_mining_client(websocket, path):
-    try:
-        # Nhận thông điệp từ client, trong đó có địa chỉ pool (host và cổng)
-        initial_message = await websocket.recv()
-        print(f"Received initial message from client: {initial_message}")
-        
-        # Giả sử thông điệp client chứa thông tin pool dưới dạng JSON: {"host": "mining-pool.example.com", "port": 3333}
-        pool_info = parse_pool_info(initial_message)
-        
-        if pool_info is None:
-            raise Exception("Unable to extract pool information from client message")
-        
-        pool_host = pool_info['host']
-        pool_port = pool_info['port']
-        
-        # Kết nối đến mining pool
-        async with websockets.connect(f"ws://{pool_host}:{pool_port}") as pool_websocket:
-            print(f"Connected to pool at {pool_host}:{pool_port}")
-            
-            # Chuyển tiếp dữ liệu từ client tới pool
-            async def forward_client_to_pool():
-                try:
-                    while True:
-                        # Nhận tất cả thông điệp từ client (bao gồm mining submit, hash, nonce, v.v...)
-                        message = await websocket.recv()  
-                        print(f"Forwarding message from client to pool: {message}")
-                        
-                        # Gửi tới mining pool
-                        await pool_websocket.send(message)
-                except websockets.ConnectionClosed:
-                    print("Client disconnected")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("Proxy")
 
-            # Chuyển tiếp dữ liệu từ pool tới client (bao gồm kết quả từ pool)
-            async def forward_pool_to_client():
-                try:
-                    while True:
-                        # Nhận tất cả thông điệp từ pool (bao gồm kết quả đào coin, trạng thái share, v.v...)
-                        message = await pool_websocket.recv()  
-                        print(f"Forwarding message from pool to client: {message}")
-                        
-                        # Gửi kết quả từ pool tới client
-                        await websocket.send(message)
-                except websockets.ConnectionClosed:
-                    print("Mining pool disconnected")
+class StratumProxy:
+    def __init__(self, listen_host, listen_port, default_pool, default_port):
+        self.listen_host = listen_host
+        self.listen_port = listen_port
+        self.default_pool = default_pool
+        self.default_port = default_port
 
-            # Chạy cả hai luồng đồng thời
-            await asyncio.gather(forward_client_to_pool(), forward_pool_to_client())
-    
-    except Exception as e:
-        print(f"Error: {e}")
-        await websocket.close()
+    async def handle_connection(self, websocket, path):
+        pool_url = f"ws://{self.default_pool}:{self.default_port}"
+        logger.info(f"New worker connected: {path}")
 
-# Hàm phân tích thông điệp của client để lấy thông tin pool (host và port)
-def parse_pool_info(message):
-    try:
-        # Phân tích thông điệp JSON
-        data = json.loads(message)
-        if 'host' in data and 'port' in data:
-            return {'host': data['host'], 'port': data['port']}
-        else:
-            return None
-    except json.JSONDecodeError:
-        return None
+        try:
+            async with websockets.connect(pool_url) as pool_websocket:
+                worker_to_pool = self.relay(websocket, pool_websocket, "Worker -> Pool")
+                pool_to_worker = self.relay(pool_websocket, websocket, "Pool -> Worker")
+                await asyncio.gather(worker_to_pool, pool_to_worker)
+        except Exception as e:
+            logger.error(f"Connection error: {e}")
 
-async def main():
-    # Chạy proxy server trên localhost:3333
-    server = await websockets.serve(handle_mining_client, "localhost", 3333)
-    print("Mining proxy server is running at ws://localhost:3333")
-    await server.wait_closed()
+    async def relay(self, source, destination, direction):
+        try:
+            async for message in source:
+                logger.info(f"{direction}: {message}")
+                await destination.send(message)
+        except websockets.ConnectionClosed:
+            logger.info(f"Connection closed: {direction}")
+        except Exception as e:
+            logger.error(f"Relay error ({direction}): {e}")
 
-# Chạy server proxy
-asyncio.run(main())
+    def start(self):
+        logger.info(f"Starting proxy on {self.listen_host}:{self.listen_port}")
+        start_server = websockets.serve(self.handle_connection, self.listen_host, self.listen_port)
+        asyncio.get_event_loop().run_until_complete(start_server)
+        asyncio.get_event_loop().run_forever()
+
+if __name__ == "__main__":
+    listen_host = "0.0.0.0"      # Lắng nghe trên tất cả IP
+    listen_port = 8080           # Cổng proxy lắng nghe
+    default_pool = "minotaurx.na.mine.zpool.ca"  # Pool mặc định
+    default_port = 7019          # Cổng pool mặc định
+
+    proxy = StratumProxy(listen_host, listen_port, default_pool, default_port)
+    proxy.start()
